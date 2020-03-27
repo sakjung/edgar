@@ -1,1 +1,1 @@
-"# edgar" 
+EDGAR
