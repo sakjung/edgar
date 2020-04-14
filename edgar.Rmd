@@ -1,0 +1,1032 @@
+---
+title: "edgar"
+author: "Jung"
+output: html_document
+---
+
+```{r include=FALSE}
+rm(list=ls())
+library(dplyr)
+library(stringr)
+library(rbenchmark)
+# Download Forms 10-K/10 Q from SEC
+library(edgar)
+# For sentiment datasets
+library(data.table)
+library(RSQLite)
+library(parallel)
+library(doSNOW)
+library(sentimentr)
+library(quanteda)
+library(tidytext)
+library(textstem)
+library(rvest)
+library(ggplot2)
+library(tidyr)
+library(reshape2)
+library(OpenImageR)
+
+# part B
+library(tidyquant)
+library(tm)
+library(SentimentAnalysis)
+```
+
+```{r global setting, include=FALSE}
+knitr::opts_chunk$set(eval=FALSE)
+```
+
+# Data Preparation
+
+```{r custom function}
+# fetch data from back up database
+loaddf <- function (dbname, dfname) {
+  con <- dbConnect(RSQLite::SQLite(), paste0(dbname,".sqlite"))
+  df <- dbGetQuery(con, paste("SELECT * FROM", dfname))
+  return(df)
+  dbDisconnect(con)
+}
+
+# save data to back up database
+backup <- function (dbname, dfname, df) {
+  con <- dbConnect(SQLite(), paste0(dbname, ".sqlite"))
+  dbWriteTable(con, dfname, df, overwrite=TRUE)
+  print(paste("Dataframe", dfname, "has been written to back up database!"))
+  print(dbListTables(con))
+  dbDisconnect(con)
+}
+
+# check the database tables
+dbcheck <- function (dbname) {
+  con <- dbConnect(SQLite(), paste0(dbname, ".sqlite"))
+  print((dbListTables(con)))
+  dbDisconnect(con)
+}
+```
+
+## Download text filings
+
+All filings of S&P 500 companies and converted HTML files can be obtained using `getFilingsHTML` function and `parallel processing`. Although `parallel processing` is normally not recommended for downloading due to network overlaod, downloading edgar filings sequentially took even more time to finish up tasks in some benchmark tests. The overall result shows that `sequential processing` could deal with about 20 companies in 1 hour while `parallel processing` could deal with about 65 to 70 companies in 1 hour showing much faster speed. I think this is possible as downloading edgar filings does not requre an intensive network per download. However, I found that computer can stop downloading process at some point if the network become not stable with extreme `parallel processing`. Therefore, I decided to use `parallel processing` with a limited number of 4 workers which is reasonable number to avoid network bottle neck and ensure a stable download speed. Before downloading the text files, `master index` should be made in advance without `Parallel processing` as it may be able to corrupt each process so that some index rda files become incomplete.
+
+```{r}
+# due to large data size
+# all data will be downloaded in external hard drive
+# with the path "D:/edgar"
+setwd("D:/edgar")
+edgar::getMasterIndex(2009:2019)
+```
+
+```{r}
+# read S&P 500 company list table
+# which is copied from appendix
+companies <- readxl::read_xlsx("C:/r_working_directory/gitgit/edgar/companies.xlsx")
+# assumed that companies with same cik 
+# are treated as one single unit
+# as edgar filings are made per CIK
+companies <- companies[!duplicated(companies$CIK),]
+
+companies$CIK <- as.character(companies$CIK)
+
+# extract all cik and length of it
+cik <- companies$CIK 
+
+iter <- length(cik)
+iter_year <- 11  # 2009 to 2019
+iter_total <- iter*iter_year # total number of iterations
+
+```
+
+```{r}
+# make progress bar 
+optionSnow <- function (iterations) {
+  i <- iterations
+  pb <- txtProgressBar(max = i, style = 3)
+  progress <- function(n) setTxtProgressBar(pb, n)
+  opts <- list(progress = progress)
+  return(opts)
+}
+
+opts_total <- optionSnow(iter_total)
+opts_year <- optionSnow(iter_year)
+```
+
+```{r download text}
+# downloading textfiles
+
+cl <- makePSOCKcluster(detectCores()-4)
+registerDoSNOW(cl)
+clusterEvalQ(cl, 
+             library(edgar))
+
+foreach (i = 1:iter, .combine = rbind) %:%
+  foreach (k = 2009:2019, .combine = c, .options.snow = opts_total) %dopar% {
+    this_cik <- cik[i]
+    setwd("D:/edgar")
+    getFilingsHTML(cik.no = this_cik,
+               form.type = c("10-K","10-Q"),
+               filing.year = k)
+    gc()
+    return(NULL)
+  }
+doParallel::stopImplicitCluster()
+stopCluster(cl)
+rm(cl, opts_total)
+
+# there are missing filings for some companies
+# total 497 companies for 10-K
+# total 499 companies for 10-Q
+
+# check which companies (CIK) have no filings 
+cik_list_q <- list.files("D:/edgar/Edgar filings_HTML view/Form 10-Q")
+companies$CIK[!companies$CIK %in% cik_list_q]
+# There is no 10-Q filings for the following CIK: 
+# 1132979
+cik_list_k <- list.files("D:/edgar/Edgar filings_HTML view/Form 10-K")
+companies$CIK[!companies$CIK %in% cik_list_k]
+# There is no 10-K filings for the following CIK: 
+# 1755672 1751788 1132979
+
+# comeback to original working directory
+# setwd("C:/r_working_directory/gitgit/edgar")
+```
+
+## Text Processing
+
+The downloaded text files should be processed in a tidy format to be used for further analyses. In this section, using html filings of `10-Q` and `10-K` forms, I will make a database in the local environment _("C:/r_working_directory/gitgit/edgar")_. The database stores all relevent data of each document. In order to make new dataset, I retrieved each filing detail from `getFilingInfo` function and added some other necessary data like GICS. Then, I added pre processed texts to corresponding documents.
+
+```{r extract text 10-Q}
+# 10-Q
+
+# prepare
+setwd("D:/edgar")
+cik_list_q <- list.files("D:/edgar/Edgar filings_HTML view/Form 10-Q")
+
+# make db in my local environment
+# so that I do not need to use external hard drive
+# db file size will be affordable 
+
+setwd("C:/r_working_directory/gitgit/edgar")
+con <- dbConnect(SQLite(),"edgar.sqlite")
+
+for (k in 1:length(cik_list_q)) {
+  
+  # pick CIK
+  this_cik <- cik_list_q[k]
+  
+  # get filing information of this CIK 
+  print(paste0("Getting filing information for ", k, "th CIK: ", this_cik))
+  setwd("D:/edgar")
+  this_filing_info <- getFilingInfo(this_cik, 2009:2019, form.type = "10-Q")
+  
+  # access all 10-Q file of this CIK
+  filings <- list.files(paste0("D:/edgar/Edgar filings_HTML view/Form 10-Q/",
+                               this_cik,"/"),
+                        full.names = T)
+  opts <- optionSnow(length(filings))
+  
+  # make clusters for parallel processing
+  cl <- makePSOCKcluster(detectCores()-1)
+  registerDoSNOW(cl)
+  clusterEvalQ(cl, {
+    library(dplyr)
+    library(edgar)
+    library(xml2)
+    library(rvest)
+    get_text <- function(filing) {
+      read_html(filing, options="HUGE") %>% 
+        html_text() %>%
+        gsub("[\r\n]", " ", .) %>%
+        trimws()
+    }
+  }
+  )
+  
+  print(paste0("Start parallel processing for ", k, "th CIK: ", this_cik))
+  start <- Sys.time()
+  
+  # not all filings are 11!! fix this
+  Q <- foreach(i = 1:length(filings), .options.snow = opts, .combine = rbind) %dopar% {
+    
+    setwd("D:/edgar")
+    
+    this_filings <- filings[i]
+    
+    # extract all texts from html form
+    # and trim 
+    # with custom function get_text
+    
+    this_text <- get_text(this_filings)
+    
+    # combine necessary data fields
+    this_q <-  this_filing_info[i,] %>%
+      mutate(symbol = companies %>%
+               filter(CIK == this_cik) %>% 
+               select(Symbol) %>%
+               pull()
+             ,
+             GICS = companies %>% 
+               filter(CIK == this_cik) %>% 
+               select(`GICS Sector`) %>%
+               pull(),
+             GICS_sub = companies %>% 
+               filter(CIK == this_cik) %>%
+               select(`GICS Sub Industry`) %>%
+               pull(),
+             text = this_text
+      )
+    
+    this_q$text <- gsub('[[:digit:]]+',' ', this_q$text)
+    this_q$text <- gsub('[[:punct:]]+',' ', this_q$text)
+    
+    return(this_q)
+  }
+  doParallel::stopImplicitCluster()
+  stopCluster(cl)
+  rm(cl)
+  gc()
+  
+  print(paste0("Finished parallel processing! It took ", Sys.time()-start, "to process"))
+  
+  # backup
+  setwd("C:/r_working_directory/gitgit/edgar")
+  dbWriteTable(con, "10_Q", Q, append=TRUE)
+  print(paste("Dataframe has been written to back up database!"))
+}
+
+# disconnect db
+dbDisconnect(con)
+```
+
+```{r extract text 10-K}
+# 10-K
+
+# prepare
+setwd("D:/edgar")
+cik_list_k <- list.files("D:/edgar/Edgar filings_HTML view/Form 10-K")
+
+setwd("C:/r_working_directory/gitgit/edgar")
+con <- dbConnect(SQLite(), "edgar.sqlite")
+
+for (k in 1:length(cik_list_k)) {
+  
+  # pick CIK
+  this_cik <- cik_list_k[k]
+  # get filing information of this CIK 
+  
+  print(paste0("Getting filing information for ", k, "th CIK: ", this_cik))
+  setwd("D:/edgar")
+  this_filing_info <- getFilingInfo(this_cik, 2009:2019, form.type = "10-K")
+  
+  # access all 10-Q file of this CIK
+  filings <- list.files(paste0("D:/edgar/Edgar filings_HTML view/Form 10-K/",
+                               this_cik,"/"),
+                        full.names = T)
+  opts <- optionSnow(length(filings))
+  
+  # make clusters for parallel processing
+  cl <- makePSOCKcluster(detectCores()-1)
+  registerDoSNOW(cl)
+  clusterEvalQ(cl, {
+    library(dplyr)
+    library(edgar)
+    library(xml2)
+    library(rvest)
+    get_text <- function(filing) {
+      read_html(filing, options="HUGE") %>% 
+        html_text() %>%
+        gsub("[\r\n]", " ", .) %>%
+        trimws()
+    }
+  }
+  )
+  
+  print(paste0("Start parallel processing for ", k, "th CIK: ", this_cik))
+  start <- Sys.time()
+  
+  K <- foreach(i = 1:length(filings), .options.snow = opts, .combine = rbind) %dopar% {
+    
+    setwd("D:/edgar")
+    
+    # cut 10-Q files for each year from 2009 to 2019
+    # three filings per year
+    
+    this_filings <- filings[i]
+    
+    # extract all texts from html form
+    # and trim 
+    # with custom function get_text
+    
+    this_text <- get_text(this_filings)
+    
+    # combine necessary data fields
+    this_k <-  this_filing_info[i,] %>%
+      mutate(symbol = companies %>%
+               filter(CIK == this_cik) %>% 
+               select(Symbol) %>%
+               pull()
+             ,
+             GICS = companies %>% 
+               filter(CIK == this_cik) %>% 
+               select(`GICS Sector`) %>%
+               pull(),
+             GICS_sub = companies %>% 
+               filter(CIK == this_cik) %>%
+               select(`GICS Sub Industry`) %>%
+               pull(),
+             text = this_text
+      )
+    
+    this_k$text <- gsub('[[:digit:]]+',' ', this_k$text)
+    this_k$text <- gsub('[[:punct:]]+',' ', this_k$text)
+    
+    return(this_k)
+  }
+  doParallel::stopImplicitCluster()
+  stopCluster(cl)
+  rm(cl)
+  gc()
+  
+  print(paste0("Finished parallel processing! It took ", Sys.time()-start, "to process"))
+  
+  # backup
+  setwd("C:/r_working_directory/gitgit/edgar")
+  dbWriteTable(con, "10_K", K, append=TRUE)
+  print(paste("Dataframe has been written to back up database!"))
+}
+
+# disconnect db
+dbDisconnect(con)
+```
+
+```{r}
+con <- dbConnect(SQLite(), "edgar.sqlite")
+
+dbListTables(con)
+
+dbSendQuery(con, "CREATE INDEX cik_idx_Q ON '10_Q' (cik)")
+dbSendQuery(con, "CREATE INDEX cik_idx_K ON '10_K' (cik)")
+
+dbDisconnect(con)
+```
+
+After creating my own dataset, I tokenised and lemmatised the processed text data for further analyses. I implemented lemmatisation for more accurate insights into the bag of words approach.
+
+```{r}
+# company name to stop words
+# other words such as United States or Q will be removed with tf-idf method
+# as they appear in all documents
+
+data("stop_words")
+
+companyname <- unlist(strsplit(companies$Security, split = " ")) %>% 
+  tolower() %>% 
+  unique()
+  
+# all digits and pucntuation in the texts are removed
+# in the previous process
+# so company name stop words should be also
+# processed in the same way
+# to find out and remove corressponding words correctly
+
+companyname <- gsub('[[:digit:]]+',' ', companyname)
+companyname <- gsub('[[:punct:]]+',' ', companyname)
+
+# divide by space for complete company name stop words
+companyname <- unlist(strsplit(companyname, split = " ")) %>% 
+  unique() %>%
+  stringi::stri_remove_empty()
+
+stop_words <- rbind(stop_words,tibble(word=companyname,lexicon="custom"))
+
+```
+
+```{r 10-Q lemma}
+con <- dbConnect(SQLite(), "edgar.sqlite")
+cik_list_q <- list.files("D:/edgar/Edgar filings_HTML view/Form 10-Q")
+
+for (k in 1:length(cik_list_q)) {
+  
+  this_cik <- cik_list_q[k]
+  
+  this_q <- dbGetQuery(con, paste0("SELECT * FROM '10_Q' WHERE cik == ", this_cik))
+  print(paste0("Fetched ", k, "th CIK: ", this_cik, "from database"))
+  this_q$date.filed <- zoo::as.Date(this_q$date.filed)
+  
+  opts <- optionSnow(nrow(this_q))
+  
+  # make clusters for parallel processing
+  cl <- makePSOCKcluster(detectCores()-1)
+  registerDoSNOW(cl)
+  clusterEvalQ(cl, {
+    library(dplyr)
+    library(tidytext)
+    library(textstem)
+  }
+  )
+  
+  print(paste0("Start parallel processing for ", k, "th CIK: ", this_cik))
+  start <- Sys.time()
+  
+  Q <- foreach(i=1:nrow(this_q), .options.snow = opts, .combine = rbind) %dopar% {
+    
+    document <- this_q[i,]
+    
+    # making word tokens upon text
+    tokens_h <- document %>% 
+      unnest_tokens(word,text) %>%
+      # count number of words
+      count(word,cik) %>%
+      # remove stop words
+      anti_join(stop_words)
+    
+    tokens_h$token_length <- nchar(tokens_h$word)
+    
+    tokens_h <- tokens_h %>% 
+      filter(token_length > 2, token_length <= 15)
+    
+    # lemmatisation unify form of tokens into their root form
+    # so that words which have actually same meaning
+    # can be considered as same word
+    
+    # make_lemma_dirctionary function gives more targeted and smaller dictionary
+    # for a document
+    # which can speed up the lemmatisation process
+    
+    lemma_dictionary_tt <- make_lemma_dictionary(tokens_h$word, engine = 'treetagger')
+    tokens_h$word <- lemmatize_words(tokens_h$word, lemma_dictionary_tt)
+    
+    tokens_h <- tokens_h %>% 
+      group_by(word, cik) %>% 
+      summarise(n = sum(n)) %>% 
+      ungroup() %>%
+      left_join(document[, !colnames(document) == "text"])
+    
+    return(tokens_h)
+  }
+  doParallel::stopImplicitCluster()
+  stopCluster(cl)
+  rm(cl)
+  gc()
+  
+  print(paste0("Finished parallel processing! It took ", Sys.time()-start, "to process"))
+  
+  # backup
+  dbWriteTable(con, "10_Q_token", Q, append=TRUE)
+  print(paste("Dataframe has been written to back up database!"))
+  rm(this_cik, this_q, opts, Q)
+  gc()
+}
+
+dbSendQuery(con, "CREATE INDEX cik_idx_Q_token ON '10_Q_token' (cik)")
+
+# disconnect db
+dbDisconnect(con)
+
+```
+
+```{r 10-K lemma}
+con <- dbConnect(SQLite(), "edgar.sqlite")
+cik_list_k <- list.files("D:/edgar/Edgar filings_HTML view/Form 10-K")
+
+for (k in 1:length(cik_list_k)) {
+  
+  this_cik <- cik_list_k[k]
+  
+  this_k <- dbGetQuery(con, paste0("SELECT * FROM '10_K' WHERE cik == ", this_cik))
+  print(paste0("Fetched ", k, "th CIK: ", this_cik, " from database"))
+  this_k$date.filed <- zoo::as.Date(this_k$date.filed)
+  
+  opts <- optionSnow(nrow(this_k))
+  
+  # make clusters for parallel processing
+  cl <- makePSOCKcluster(detectCores()-1)
+  registerDoSNOW(cl)
+  clusterEvalQ(cl, {
+    library(dplyr)
+    library(tidytext)
+    library(textstem)
+  }
+  )
+  
+  print(paste0("Start parallel processing for ", k, "th CIK: ", this_cik))
+  start <- Sys.time()
+  
+  K <- foreach(i=1:nrow(this_k), .options.snow = opts, .combine = rbind) %dopar% {
+    
+    document <- this_k[i,]
+    
+    # making word tokens upon text
+    tokens_h <- document %>% 
+      unnest_tokens(word,text) %>%
+      # count number of words
+      count(word,cik) %>%
+      # remove stop words
+      anti_join(stop_words)
+    
+    tokens_h$token_length <- nchar(tokens_h$word)
+    
+    tokens_h <- tokens_h %>% 
+      filter(token_length > 2, token_length <= 15)
+    
+    # lemmatisation unify form of tokens into their root form
+    # so that words which have actually same meaning
+    # can be considered as same word
+    
+    # make_lemma_dirctionary function gives more targeted and smaller dictionary
+    # for a document
+    # which can speed up the lemmatisation process
+    
+    lemma_dictionary_tt <- make_lemma_dictionary(tokens_h$word, engine = 'treetagger')
+    tokens_h$word <- lemmatize_words(tokens_h$word, lemma_dictionary_tt)
+    
+    tokens_h <- tokens_h %>% 
+      group_by(word, cik) %>% 
+      summarise(n = sum(n)) %>% 
+      ungroup() %>%
+      left_join(document[, !colnames(document) == "text"])
+    
+    return(tokens_h)
+  }
+  doParallel::stopImplicitCluster()
+  stopCluster(cl)
+  rm(cl)
+  gc()
+  
+  print(paste0("Finished parallel processing! It took ", Sys.time()-start, "to process"))
+  
+  # backup
+  dbWriteTable(con, "10_K_token", K, append=TRUE)
+  print(paste("Dataframe has been written to back up database!"))
+  rm(this_cik, this_k, opts, K)
+  gc()
+}
+
+dbSendQuery(con, "CREATE INDEX cik_idx_K_token ON '10_K_token' (cik)")
+
+# disconnect db
+dbDisconnect(con)
+```
+
+## TF-IDF
+
+Using lemmatised words, I will provide outlines of TF-IDF weights for important keywords. Firstly, TF-IDF should be calculated across each category corpus. TF-IDF can remove useless words which appear too common or too rare in the corpus by cutting off based on its values. Then, word frequency can be summed up to figure out the top 10 key words in the corpus.
+
+After some trials with tf_idf weighting, I realised that tf_idf cannot trim all the words perfectly that I do not want. I added some unnecessary words as possible stop words which should be removed for clearer key words analysis in a corpus. 
+
+```{r stop_words}
+# found after some trials with industry level tf_idf weighting
+stop_words <- rbind(stop_words,
+                    tibble(word=c("january", "february", "march",
+                                  "april", "may", "june",
+                                  "july", "august","september",
+                                  "october","november","december",
+                                  "billion", "million", "dollar",
+                                  "percent"),lexicon="custom"))
+
+# found after some trials with market level tf_idf weighting
+stop_words <- rbind(stop_words,
+                    tibble(word=c("content" ,"defer", "deferred", 
+                                  "net", "reporting", "lower", 
+                                  "ebitda", "gaap", "thousand",
+                                  "reporting"),lexicon="custom"))
+```
+
+### TF-IDF (industry level)
+
+```{r}
+gics_q <- companies_q %>%
+  select(`GICS Sector`) %>%
+  unique() %>%
+  pull()  
+opts <- optionSnow(length(gics_q))
+
+# make clusters for parallel processing
+cl <- makePSOCKcluster(detectCores()-1)
+registerDoSNOW(cl)
+clusterEvalQ(cl, {
+  library(dplyr)
+  library(tidyr)
+  library(tidytext)
+  library(RSQLite)
+  library(zoo)
+}
+)
+
+
+gics_list_q <- foreach(i=1:length(gics_q), .options.snow = opts) %dopar% {
+  
+  this_gics <- gics_q[i]
+  this_gics_cik <- companies_q %>% 
+    filter(`GICS Sector` == this_gics) %>%
+    select(CIK) %>%
+    pull()
+  
+  con <- dbConnect(SQLite(), paste0("edgar.sqlite"))  
+  query <- paste0("SELECT * FROM '10_Q_token' WHERE cik IN (", 
+                    paste(this_gics_cik, collapse = ', '),
+                    ")")
+  this_q <- dbGetQuery(con, query)
+    
+  this_q$date.filed <- zoo::as.Date(this_q$date.filed)
+  this_q <- this_q %>%
+    unite(., "doc_id", cik, filing.year, quarter, remove = FALSE) %>%
+    as_tibble()
+    
+  tokens_tf_idf <- this_q %>%
+    bind_tf_idf(word,doc_id,n)
+  
+  # remove too rare terms
+  tokens_tf_idf <- tokens_tf_idf %>% 
+    filter(tf_idf<0.002)
+    
+  # remove too common terms across the documents
+  tokens_tf_idf <- tokens_tf_idf %>% 
+    filter(tf_idf>0.0003)
+    
+  top_10 <- tokens_tf_idf %>%
+    group_by(word, GICS) %>% 
+    summarise(n = sum(n)) %>% 
+    ungroup() %>%
+    anti_join(stop_words) %>%
+    top_n(10, n) %>%
+    select(-n) %>%
+    mutate(rank = row_number())
+  
+  # disconnect db
+  dbDisconnect(con)
+    
+  return(top_10)
+}
+  
+doParallel::stopImplicitCluster()
+stopCluster(cl)
+rm(cl)
+gc()
+
+# back up
+save(gics_list_q, file = "gics_list_q.rda")
+```
+
+```{r}
+for(g in 1:length(gics_list_q)){
+  print(gics_list_q[g])
+}
+```
+
+```{r}
+gics_k <- companies_k %>%
+  select(`GICS Sector`) %>%
+  unique() %>%
+  pull()  
+opts <- optionSnow(length(gics_k))
+
+# make clusters for parallel processing
+cl <- makePSOCKcluster(detectCores()-1)
+registerDoSNOW(cl)
+clusterEvalQ(cl, {
+  library(dplyr)
+  library(tidyr)
+  library(tidytext)
+  library(RSQLite)
+  library(zoo)
+}
+)
+
+gics_list_k <- foreach(i=1:length(gics_k), .options.snow = opts) %dopar% {
+  
+  this_gics <- gics_k[i]
+  this_gics_cik <- companies_k %>% 
+    filter(`GICS Sector` == this_gics) %>%
+    select(CIK) %>%
+    pull()
+  
+  con <- dbConnect(SQLite(), paste0("edgar.sqlite"))  
+  query <- paste0("SELECT * FROM '10_K_token' WHERE cik IN (", 
+                  paste(this_gics_cik, collapse = ', '),
+                  ")")
+  this_k <- dbGetQuery(con, query)
+  
+  this_k$date.filed <- zoo::as.Date(this_k$date.filed)
+  this_k <- this_k %>%
+    unite(., "doc_id", cik, filing.year, quarter, remove = FALSE) %>%
+    as_tibble()
+  
+  tokens_tf_idf <- this_k %>%
+    bind_tf_idf(word,doc_id,n)
+  
+  # remove too rare terms
+  tokens_tf_idf <- tokens_tf_idf %>% 
+    filter(tf_idf<0.002)
+  
+  # remove too common terms across the documents
+  tokens_tf_idf <- tokens_tf_idf %>% 
+    filter(tf_idf>0.0003)
+  
+  top_10 <- tokens_tf_idf %>%
+    group_by(word, GICS) %>% 
+    summarise(n = sum(n)) %>% 
+    ungroup() %>%
+    anti_join(stop_words) %>%
+    top_n(10, n) %>%
+    select(-n) %>%
+    mutate(rank = row_number())
+  
+  # disconnect db
+  dbDisconnect(con)
+  
+  return(top_10)
+}
+
+doParallel::stopImplicitCluster()
+stopCluster(cl)
+rm(cl)
+gc()
+
+# back up
+save(gics_list_k, file = "gics_list_k.rda")
+```
+
+```{r}
+for(k in 1:length(gics_list_k)){
+  print(gics_list_k[k])
+}
+```
+
+### TF-IDF (market level)
+
+```{r}
+market_q <- companies_q %>%
+  select(`GICS Sub Industry`) %>%
+  unique() %>%
+  pull()  
+opts <- optionSnow(length(market_q))
+
+# make clusters for parallel processing
+cl <- makePSOCKcluster(detectCores()-1)
+registerDoSNOW(cl)
+clusterEvalQ(cl, {
+  library(dplyr)
+  library(tidyr)
+  library(tidytext)
+  library(RSQLite)
+  library(zoo)
+}
+)
+
+market_list_q <- foreach(i=1:length(market_q), .options.snow = opts) %dopar% {
+  
+  this_market <- market_q[i]
+  this_market_cik <- companies_q %>% 
+    filter(`GICS Sub Industry` == this_market) %>%
+    select(CIK) %>%
+    pull()
+  
+  con <- dbConnect(SQLite(), paste0("edgar.sqlite"))  
+  query <- paste0("SELECT * FROM '10_Q_token' WHERE cik IN (", 
+                  paste(this_market_cik, collapse = ', '),
+                  ")")
+  this_q <- dbGetQuery(con, query)
+  
+  this_q$date.filed <- zoo::as.Date(this_q$date.filed)
+  this_q <- this_q %>%
+    unite(., "doc_id", cik, filing.year, quarter, remove = FALSE) %>%
+    as_tibble()
+  
+  tokens_tf_idf <- this_q %>%
+    bind_tf_idf(word,doc_id,n)
+  
+  # remove too rare terms
+  tokens_tf_idf <- tokens_tf_idf %>% 
+    filter(tf_idf<0.002)
+  
+  # remove too common terms across the documents
+  tokens_tf_idf <- tokens_tf_idf %>% 
+    filter(tf_idf>0.0003)
+  
+  top_10 <- tokens_tf_idf %>%
+    group_by(word, GICS_sub) %>% 
+    summarise(n = sum(n)) %>% 
+    ungroup() %>%
+    anti_join(stop_words) %>%
+    top_n(10, n) %>%
+    select(-n) %>%
+    mutate(rank = row_number())
+  
+  # disconnect db
+  dbDisconnect(con)
+  
+  return(top_10)
+}
+
+doParallel::stopImplicitCluster()
+stopCluster(cl)
+rm(cl)
+gc()
+
+# back up
+save(market_list_q, file = "market_list_q.rda")
+```
+
+```{r}
+market_k <- companies_k %>%
+  select(`GICS Sub Industry`) %>%
+  unique() %>%
+  pull()  
+opts <- optionSnow(length(market_k))
+
+# make clusters for parallel processing
+cl <- makePSOCKcluster(detectCores()-1)
+registerDoSNOW(cl)
+clusterEvalQ(cl, {
+  library(dplyr)
+  library(tidyr)
+  library(tidytext)
+  library(RSQLite)
+  library(zoo)
+}
+)
+
+market_list_k <- foreach(i=1:length(market_k), .options.snow = opts) %dopar% {
+  
+  this_market <- market_k[i]
+  this_market_cik <- companies_k %>% 
+    filter(`GICS Sub Industry` == this_market) %>%
+    select(CIK) %>%
+    pull()
+  
+  con <- dbConnect(SQLite(), paste0("edgar.sqlite"))  
+  query <- paste0("SELECT * FROM '10_K_token' WHERE cik IN (", 
+                  paste(this_market_cik, collapse = ', '),
+                  ")")
+  this_k <- dbGetQuery(con, query)
+  
+  this_k$date.filed <- zoo::as.Date(this_k$date.filed)
+  this_k <- this_k %>%
+    unite(., "doc_id", cik, filing.year, quarter, remove = FALSE) %>%
+    as_tibble()
+  
+  tokens_tf_idf <- this_k %>%
+    bind_tf_idf(word,doc_id,n)
+  
+  # remove too rare terms
+  tokens_tf_idf <- tokens_tf_idf %>% 
+    filter(tf_idf<0.002)
+  
+  # remove too common terms across the documents
+  tokens_tf_idf <- tokens_tf_idf %>% 
+    filter(tf_idf>0.0003)
+  
+  top_10 <- tokens_tf_idf %>%
+    group_by(word, GICS_sub) %>% 
+    summarise(n = sum(n)) %>% 
+    ungroup() %>%
+    anti_join(stop_words) %>%
+    top_n(10, n) %>%
+    select(-n) %>%
+    mutate(rank = row_number())
+  
+  # disconnect db
+  dbDisconnect(con)
+  
+  return(top_10)
+}
+
+doParallel::stopImplicitCluster()
+stopCluster(cl)
+rm(cl)
+gc()
+
+# back up
+save(market_list_k, file = "market_list_k.rda")
+```
+
+# PART B
+
+## Single Company Sentiment
+
+I first tried a sentiment visualisation using `edgar` package, in order to have a brief look at the sentiment changes of a company over time period. I used `Nike` to explore the sentiments of its' `10-Q` and `10-K` forms. This code can be useful to see sentiment details of edgar filings of a single company. 
+
+```{r EDA on text polarity}
+# choose a target compnay 
+this_company <- "nike"
+this_cik <- cik[which(grepl(this_company, companies$Security, ignore.case = TRUE))]
+
+```
+
+```{r}
+cl <- makePSOCKcluster(detectCores()-2)
+registerDoSNOW(cl)
+clusterEvalQ(cl, 
+             library(edgar))
+
+# set working directory as all the edgar filings are stored
+setwd("D:/edgar")
+# get sentiments from 10-Q filings of Nike
+q <- foreach(i = 2009:2019, .options.snow = opts_year, .combine = rbind) %dopar% {
+  setwd("D:/edgar")
+  this_year <- edgar::getSentiment(this_cik,filing.year =i,form.type = "10-Q")
+}
+
+k <- foreach(i = 2009:2019, .options.snow = opts_year, .combine = rbind) %dopar% {
+  setwd("D:/edgar")
+  this_year <- getSentiment(this_cik,filing.year =i,form.type = "10-K")
+}
+
+# remove workers
+doParallel::stopImplicitCluster()
+stopCluster(cl)
+rm(cl)
+```
+
+```{r}
+nike_q <- q %>% select(date.filed,lm.dictionary.count,
+                       lm.positive.count,lm.negative.count) %>% 
+  mutate(positives = lm.positive.count / lm.dictionary.count,
+         negatives = lm.negative.count / lm.dictionary.count) %>%
+  gather(key = "polarity", value = "ratio", positives, negatives) %>%
+  ggplot(aes(x=date.filed,y=ratio, color = factor(polarity))) +
+  geom_line() + 
+  ggtitle("10-Q Polarity") +
+  labs(color = "Polarity")
+
+
+nike_k <- k %>% select(date.filed,lm.dictionary.count,
+                       lm.positive.count,lm.negative.count) %>% 
+  mutate(positives = lm.positive.count / lm.dictionary.count,
+         negatives = lm.negative.count / lm.dictionary.count) %>%
+  gather(key = "polarity", value = "ratio", positives, negatives) %>%
+  ggplot(aes(x=date.filed,y=ratio, color = factor(polarity))) +
+  geom_line() + 
+  ggtitle("10-K Polarity") +
+  labs(color = "Polarity")
+
+# ggsave("graph/nike_sentiment_q.png", plot = nike_q)
+# ggsave("graph/nike_sentiment_k.png", plot = nike_k)
+```
+
+```{r eval = TRUE, echo = FALSE}
+OpenImageR::readImage("graph/nike_sentiment_q.png") %>% imageShow()
+OpenImageR::readImage("graph/nike_sentiment_k.png") %>% imageShow()
+```
+
+## Sentiment Association with Financial Indicators
+
+In this section, I will figure out the relationship between sentiment of filings and stock prices. In common sense, I would expect the company stock price will decrease in the following day of filing date if the filing contains more negative sentiments and vice versa. In order to check whether changes in stock prices are significant or not, I tried regression models with the price changes and sentiments. In addition, I used various sentiment dictionaries in order to put more variability and reliability on the regression results.
+
+```{r}
+# companies_q contains all available the companies
+symbols <- companies_q %>% select(Symbol) %>% pull()
+
+# some symbols need to changed 
+# according to Yahoo Finance format
+# to obtain the prices
+symbols <- str_replace_all(symbols, "\\.", "-")
+symbols[str_detect(symbols, "\\.")]
+
+con <- dbConnect(SQLite(), "edgar.sqlite")
+
+for (i in 1:length(symbols)) {
+  
+  tryCatch(
+    {
+      message(paste0("Getting price information for ",i,"th symbol: ", symbols[i]))
+      prices <- tq_get(symbols[i],
+                       from = "2009-01-01",
+                       to = "2020-01-01",
+                       get = "stock.prices")
+      # back up
+      dbWriteTable(con, "prices", prices, append=TRUE)
+      
+      rm(prices)
+      gc()
+      message(paste0("Moved prices of ", symbols[i], " to database!"))
+    },
+    error=function(cond) {
+      message(paste("unable to retrieve prices for this symbol:", 
+                    symbols[i]))
+      message("This is the original error message:")
+      message(cond)
+      return(NA)
+    }
+  )
+}
+
+dbSendQuery(con, "CREATE INDEX symbol ON 'prices' (symbol)")
+
+dbDisconnect(con)
+```
+
+*Dictionaries Required:*
+
+- DictionaryHE (Henry’s finance-specific dictionary)
+- DictionaryLM (LoughranMcDonald finance-specific dictionary)
+- NRC (emotions)
+- AFIN
+
+plotSentiment (good at plotting time series sentiment)
+
+```{r}
+# data(DictionaryHE)
+# data(DictionaryLM)
+
+```
