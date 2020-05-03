@@ -1,12 +1,10 @@
 ---
 title: "edgar"
 author: "Jung"
-output:
-  word_document: default
-  html_document: default
-knit: (function(inputFile, encoding) {
-  rmarkdown::render(inputFile, encoding = encoding,
-  output_dir = "output", output_format = "all") })
+output: 
+  html_document:
+    toc: TRUE
+    toc_depth: 3
 ---
 
 <style>
@@ -14,8 +12,10 @@ body {
 text-align: justify}
 </style>
 
-```{r include=FALSE}
+
+```{r message=FALSE}
 rm(list=ls())
+library(knitr)
 library(dplyr)
 library(stringr)
 library(rbenchmark)
@@ -42,7 +42,7 @@ library(tm)
 library(SentimentAnalysis)
 
 # part C
-library (koRpus)
+library(koRpus)
 library(stm)
 ```
 
@@ -97,6 +97,7 @@ scale_x_reordered <- function(..., sep = "___") {
 
 ```{r global setting, include=FALSE}
 knitr::opts_chunk$set(eval=FALSE)
+
 ```
 
 # Part A
@@ -135,7 +136,6 @@ opts_total <- optionSnow(iter_total)
 opts_year <- optionSnow(iter_year)
 
 ```
-
 
 ```{r download text}
 # downloading textfiles
@@ -394,6 +394,7 @@ con <- dbConnect(SQLite(), "edgar.sqlite")
 
 dbListTables(con)
 
+# create index for fast query
 dbSendQuery(con, "CREATE INDEX cik_idx_Q ON '10_Q' (cik)")
 dbSendQuery(con, "CREATE INDEX cik_idx_K ON '10_K' (cik)")
 
@@ -458,7 +459,9 @@ for (k in 1:length(cik_list_q)) {
   print(paste0("Start parallel processing for ", k, "th CIK: ", this_cik))
   start <- Sys.time()
   
-  Q <- foreach(i=1:nrow(this_q), .options.snow = opts, .combine = rbind) %dopar% {
+  Q <- foreach(i=1:nrow(this_q), 
+               .options.snow = opts, 
+               .combine = rbind) %dopar% {
     
     document <- this_q[i,]
     
@@ -480,7 +483,7 @@ for (k in 1:length(cik_list_q)) {
     # can be considered as same word
     
     # make_lemma_dirctionary function gives more targeted and smaller dictionary
-    # for a document
+    # for a particular document (i.e. document specific lemma dictionary)
     # which can speed up the lemmatisation process
     
     lemma_dictionary_tt <- make_lemma_dictionary(tokens_h$word, engine = 'treetagger')
@@ -499,7 +502,8 @@ for (k in 1:length(cik_list_q)) {
   rm(cl)
   gc()
   
-  print(paste0("Finished parallel processing! It took ", Sys.time()-start, "to process"))
+  print(paste0("Finished parallel processing! It took ",
+               Sys.time()-start, "to process"))
   
   # backup
   dbWriteTable(con, "10_Q_token", Q, append=TRUE)
@@ -542,7 +546,9 @@ for (k in 1:length(cik_list_k)) {
   print(paste0("Start parallel processing for ", k, "th CIK: ", this_cik))
   start <- Sys.time()
   
-  K <- foreach(i=1:nrow(this_k), .options.snow = opts, .combine = rbind) %dopar% {
+  K <- foreach(i=1:nrow(this_k), 
+               .options.snow = opts, 
+               .combine = rbind) %dopar% {
     
     document <- this_k[i,]
     
@@ -583,7 +589,8 @@ for (k in 1:length(cik_list_k)) {
   rm(cl)
   gc()
   
-  print(paste0("Finished parallel processing! It took ", Sys.time()-start, "to process"))
+  print(paste0("Finished parallel processing! It took ", 
+               Sys.time()-start, "to process"))
   
   # backup
   dbWriteTable(con, "10_K_token", K, append=TRUE)
@@ -600,7 +607,7 @@ dbDisconnect(con)
 
 ## TF-IDF
 
-Using lemmatised words, I will provide outlines of TF-IDF weights for important keywords. Firstly, TF-IDF should be calculated across each category corpus. TF-IDF can remove useless words which appear too common or too rare in the corpus by cutting off based on its values. Then, word frequency can be summed up to figure out the top 10 key words in the corpus.
+Using lemmatised words, I will provide outlines of TF-IDF weights for important keywords across various levels. Firstly, TF-IDF should be calculated across each category corpus. TF-IDF can remove useless words which appear too common or too rare in the corpus by cutting off based on its values. Then, word frequency can be summed up to figure out the top 10 key words in the corpus.
 
 After some trials with tf_idf weighting, I realised that tf_idf cannot trim all the words perfectly that I do not want. I added some unnecessary words as possible stop words which should be removed for clearer key words analysis in a corpus. 
 
@@ -625,8 +632,8 @@ I made unique doument id (format: cik_date.filed) by combining `cik` and `date.f
 
 e.g. cik: 779152
 
-|company.name| form.type| date.filed| quarter |filing.year|
-|-----------|-----------|------------|---------|----------|
+|row number|CIK|company.name| form.type| date.filed| quarter |filing.year|
+|---------|-----|-----------|-----------|-----------|------------|---------|
 |1|	779152|	HENRY JACK  |ASSOCIATES INC	|10-Q	|2015-06-25|	2	|2015|
 |2|	779152|	HENRY JACK  | ASSOCIATES INC	|10-Q	|2015-06-25|	2	|2015|
 |3|	779152|	HENRY JACK  | ASSOCIATES INC |	10-Q	|2015-11-06|	4	|2015|
@@ -639,11 +646,16 @@ After dealing with this problem, I will implement TF-IDF weighting on:
 2 - Industry level corpus
 3 - market level corpus
 
-Then, I will trim too rare and too common tokens using the tf-idf values. Finally, I will investigate top 10 words (important keywords) for the three levels. 
+Then, I will trim too rare and too common tokens (words) using the tf-idf values. Finally, I will provide top 10 words (important keywords) for the three levels. 
 
 ### TF-IDF (10-Q)
 
 ```{r}
+# dealing with duplicated documents
+# this chunk code inspect thorugh whole data
+# by each CIK
+# and deal with the identical documents
+
 companies_q <- companies %>% filter(! CIK %in% "1132979")
 companies_k <- companies %>% filter(! CIK %in% c("1755672", "1751788", "1132979"))
 
@@ -661,12 +673,15 @@ clusterEvalQ(cl, {
 
 opts <- optionSnow(nrow(companies_q))
 
-Q_token <- foreach(i=1:nrow(companies_q), .options.snow = opts, .combine = rbind) %dopar% {
+Q_token <- foreach(i=1:nrow(companies_q), 
+                   .options.snow = opts, 
+                   .combine = rbind) %dopar% {
   
   con <- dbConnect(SQLite(), paste0("edgar.sqlite"))  
   this_cik <- companies_q$CIK[i]
   
-  this_q <- dbGetQuery(con, paste0("SELECT * FROM `10_Q_token` WHERE cik == ", this_cik))
+  this_q <- dbGetQuery(con, paste0("SELECT * FROM `10_Q_token` WHERE cik == ", 
+                                   this_cik))
   
   this_q$date.filed <- zoo::as.Date(this_q$date.filed)
   this_q <- this_q %>% 
@@ -700,12 +715,11 @@ gc()
 
 # overwrite
 backup("edgar", "10_Q_token", Q_token)
-
 ```
 
-#### Entire corpus
 
 ```{r}
+
 # tf-idf on entire corpus
 tokens_tf_idf_q <- Q_token %>%
   bind_tf_idf(word,doc_id,n)
@@ -744,7 +758,8 @@ top_10_q <- tokens_tf_idf_q %>%
   select(-n) %>%
   mutate(rank = row_number())
 
-ggplot(top_10_q, aes(x = reorder(word, n), y = n)) + 
+ggplot(top_10_q, 
+       aes(x = reorder(word, n), y = n)) + 
   geom_bar(stat = "identity") + 
   coord_flip() +
   ylab("frequency") +
@@ -766,7 +781,6 @@ ggplot(top_10_q, aes(x = reorder(word, n), y = n)) +
 
 ```
 
-#### Indsutry level corpus
 
 ```{r}
 # tf-idf on industry level
@@ -825,7 +839,10 @@ top_10_q_industry <- tokens_tf_idf_q %>%
   mutate(rank = row_number()) %>%
   rename(GICS = `factor(GICS)`)
 
-ggplot(top_10_q_industry, aes(x = reorder_within(word, n, GICS), y = n, group = factor(GICS), fill = factor(GICS))) + 
+ggplot(top_10_q_industry, 
+       aes(x = reorder_within(word, n, GICS),
+           y = n, group = factor(GICS),
+           fill = factor(GICS))) + 
   geom_bar(stat = "identity") + 
   scale_x_reordered() +
   facet_wrap(~ GICS, scales = "free") +
@@ -839,7 +856,10 @@ ggplot(top_10_q_industry, aes(x = reorder_within(word, n, GICS), y = n, group = 
 ```{r eval = TRUE, echo = FALSE}
 # to display
 
-ggplot(top_10_q_industry, aes(x = reorder_within(word, n, GICS), y = n, group = factor(GICS), fill = factor(GICS))) + 
+ggplot(top_10_q_industry, 
+       aes(x = reorder_within(word, n, GICS), 
+           y = n, group = factor(GICS), 
+           fill = factor(GICS))) + 
   geom_bar(stat = "identity") + 
   scale_x_reordered() +
   facet_wrap(~ GICS, scales = "free") +
@@ -849,8 +869,6 @@ ggplot(top_10_q_industry, aes(x = reorder_within(word, n, GICS), y = n, group = 
   coord_flip()
 
 ```
-
-#### Market level corpus
 
 ```{r}
 # tf-idf on market level
@@ -899,6 +917,25 @@ top_10_q_market <- tokens_tf_idf_q %>%
   arrange(`factor(GICS_sub)`, desc(n)) %>%
   mutate(rank = row_number()) %>%
   rename(GICS_sub = `factor(GICS_sub)`)
+
+# there are total 128 markets
+# which is too large number to display
+# I will extract 10 markets to show as an example
+
+top_10_q_market_sample <- top_10_q_market %>%
+  head(., 100)
+
+ggplot(top_10_q_market_sample,
+       aes(x = reorder_within(word, n, GICS_sub),
+           y = n, group = factor(GICS_sub), 
+           fill = factor(GICS_sub))) + 
+  geom_bar(stat = "identity") + 
+  scale_x_reordered() +
+  facet_wrap(~ GICS_sub, scales = "free") +
+  ylab("frequency") +
+  xlab("top 10 word") + 
+  theme(legend.position = "none") +
+  coord_flip()
   
 # save all
 save(top_10_q, top_10_q_industry, top_10_q_market, file = "top_10_q.rda")
@@ -916,7 +953,10 @@ gc()
 top_10_q_market_sample <- top_10_q_market %>%
   head(., 100)
 
-ggplot(top_10_q_market_sample, aes(x = reorder_within(word, n, GICS_sub), y = n, group = factor(GICS_sub), fill = factor(GICS_sub))) + 
+ggplot(top_10_q_market_sample, 
+       aes(x = reorder_within(word, n, GICS_sub),
+           y = n, group = factor(GICS_sub), 
+           fill = factor(GICS_sub))) + 
   geom_bar(stat = "identity") + 
   scale_x_reordered() +
   facet_wrap(~ GICS_sub, scales = "free") +
@@ -925,6 +965,7 @@ ggplot(top_10_q_market_sample, aes(x = reorder_within(word, n, GICS_sub), y = n,
   theme(legend.position = "none") +
   coord_flip()
 ```
+
 
 ### TF-IDF (10-K)
 
@@ -943,12 +984,15 @@ clusterEvalQ(cl, {
 
 opts <- optionSnow(nrow(companies_k))
 
-K_token <- foreach(i=1:nrow(companies_k), .options.snow = opts, .combine = rbind) %dopar% {
+K_token <- foreach(i=1:nrow(companies_k),
+                   .options.snow = opts,
+                   .combine = rbind) %dopar% {
   
   con <- dbConnect(SQLite(), paste0("edgar.sqlite"))  
   this_cik <- companies_k$CIK[i]
   
-  this_k <- dbGetQuery(con, paste0("SELECT * FROM `10_K_token` WHERE cik == ", this_cik))
+  this_k <- dbGetQuery(con, 
+                       paste0("SELECT * FROM `10_K_token` WHERE cik == ", this_cik))
   
   this_k$date.filed <- zoo::as.Date(this_k$date.filed)
   this_k <- this_k %>% 
@@ -985,10 +1029,8 @@ backup("edgar", "10_K_token", K_token)
 
 ```
 
-#### Entire corpus
-
 ```{r}
-# entire corpus
+# tf-idf on entire corpus
 tokens_tf_idf_k <- K_token %>%
   bind_tf_idf(word,doc_id,n)
 
@@ -1028,7 +1070,9 @@ top_10_k <- tokens_tf_idf_k %>%
   arrange(desc(n)) %>%
   mutate(rank = row_number())
 
-ggplot(top_10_k, aes(x = reorder(word, n), y = n)) + 
+ggplot(top_10_k,
+       aes(x = reorder(word, n),
+           y = n)) + 
   geom_bar(stat = "identity") + 
   coord_flip() +
   ylab("frequency") +
@@ -1042,15 +1086,15 @@ load("top_10_k.rda")
 # entire corpus
 print(top_10_k)
 
-ggplot(top_10_k, aes(x = reorder(word, n), y = n)) + 
+ggplot(top_10_k, 
+       aes(x = reorder(word, n), 
+           y = n)) + 
   geom_bar(stat = "identity") + 
   coord_flip() +
   ylab("frequency") +
   xlab("top 10 word")
 
 ```
-
-#### Industry level
 
 ```{r}
 # tf-idf on industry level
@@ -1101,7 +1145,10 @@ top_10_k_industry <- tokens_tf_idf_k %>%
   mutate(rank = row_number()) %>%
   rename(GICS = `factor(GICS)`)
 
-ggplot(top_10_k_industry, aes(x = reorder_within(word, n, GICS), y = n, group = factor(GICS), fill = factor(GICS))) + 
+ggplot(top_10_k_industry,
+       aes(x = reorder_within(word, n, GICS),
+           y = n, group = factor(GICS),
+           fill = factor(GICS))) + 
   geom_bar(stat = "identity") + 
   scale_x_reordered() +
   facet_wrap(~ GICS, scales = "free") +
@@ -1113,8 +1160,12 @@ ggplot(top_10_k_industry, aes(x = reorder_within(word, n, GICS), y = n, group = 
 ```
 
 ```{r eval = TRUE, echo = FALSE}
+
 # to display
-ggplot(top_10_k_industry, aes(x = reorder_within(word, n, GICS), y = n, group = factor(GICS), fill = factor(GICS))) + 
+ggplot(top_10_k_industry,
+       aes(x = reorder_within(word, n, GICS), 
+           y = n, group = factor(GICS), 
+           fill = factor(GICS))) + 
   geom_bar(stat = "identity") + 
   scale_x_reordered() +
   facet_wrap(~ GICS, scales = "free") +
@@ -1123,8 +1174,6 @@ ggplot(top_10_k_industry, aes(x = reorder_within(word, n, GICS), y = n, group = 
   theme(legend.position = "none") +
   coord_flip()
 ```
-
-#### Market level
 
 ```{r}
 # tf-idf on market level
@@ -1175,8 +1224,28 @@ top_10_k_market <- tokens_tf_idf_k %>%
   mutate(rank = row_number()) %>%
   rename(GICS_sub = `factor(GICS_sub)`)
 
+# there are total 128 markets
+# which is too large number to display
+# I will extract 10 markets to show as an example
+
+top_10_k_market_sample <- top_10_k_market %>%
+  head(., 100)
+
+ggplot(top_10_k_market_sample,
+       aes(x = reorder_within(word, n, GICS_sub), 
+           y = n, group = factor(GICS_sub), 
+           fill = factor(GICS_sub))) + 
+  geom_bar(stat = "identity") + 
+  scale_x_reordered() +
+  facet_wrap(~ GICS_sub, scales = "free") +
+  ylab("frequency") +
+  xlab("top 10 word") + 
+  theme(legend.position = "none") +
+  coord_flip()
+
+
 # back up
-# save(top_10_k, top_10_k_industry, top_10_k_market, file = "top_10_k.rda")
+save(top_10_k, top_10_k_industry, top_10_k_market, file = "top_10_k.rda")
 
 rm(top_10_k, top_10_k_industry, top_10_k_market, tokens_tf_idf_k)
 gc()
@@ -1192,7 +1261,10 @@ gc()
 top_10_k_market_sample <- top_10_k_market %>%
   head(., 100)
 
-ggplot(top_10_k_market_sample, aes(x = reorder_within(word, n, GICS_sub), y = n, group = factor(GICS_sub), fill = factor(GICS_sub))) + 
+ggplot(top_10_k_market_sample, 
+       aes(x = reorder_within(word, n, GICS_sub),
+           y = n, group = factor(GICS_sub), 
+           fill = factor(GICS_sub))) + 
   geom_bar(stat = "identity") + 
   scale_x_reordered() +
   facet_wrap(~ GICS_sub, scales = "free") +
@@ -1202,11 +1274,16 @@ ggplot(top_10_k_market_sample, aes(x = reorder_within(word, n, GICS_sub), y = n,
   coord_flip()
 ```
 
+
+
+
+<br />
+
 # PART B
 
 ## Single Company Sentiment Visualisation
 
-I first provide a sentiment visualisation using `edgar` package, in order to have a brief look at the sentiment changes of a company in interest over time period. I used `Nike` to explore the sentiments of its' `10-Q` and `10-K` forms. This code can be useful to see sentiment details of edgar filings of a single company. 
+I first introduce a simple sentiment visualisation using `edgar` package, in order to have a brief look at the sentiment changes of a company in interest over time period. I used `Nike` to explore the sentiments of its' `10-Q` and `10-K` forms. This code can be useful to see sentiment details of edgar filings of a single company. 
 
 ```{r EDA on text polarity}
 # choose a target compnay 
@@ -1274,7 +1351,7 @@ OpenImageR::readImage("graph/nike_sentiment_k.png") %>% imageShow()
 
 ## Sentiment Association with Financial Indicators
 
-In this section, I will figure out the relationship between `sentiment of filings` and `stock price`. In common sense, I expect company stock price will decrease in the following day of filing date if the filing contains more negative sentiments and vice versa. In order to check whether changes in stock prices are significant or not, I tried regression models with `price change` and various `sentiment score` as variables. In addition, I used various sentiment dictionaries in order to put more variability and reliability on the regression results. Before sentiment analysis, price data should be downloaded from `Yahoo Finance` first.
+In this section, I will figure out the relationship between `sentiment of edgar filings` and `stock price`. In common sense, I expect company stock price will decrease in the following day of filing date if the filing contains more negative sentiments and vice versa. In order to check whether changes in stock prices are significant or not, I tried regression models with `price change` and various `sentiment score` as variables. In addition, I used various sentiment dictionaries in order to put more variability and reliability on the regression results. Before sentiment analysis, price data should be downloaded from `Yahoo Finance` first using `tidyquant` package.
 
 ```{r}
 # companies_q contains all available the companies
@@ -1328,11 +1405,14 @@ dbDisconnect(con)
 
 Using these four dictionaries, I will calculate the sentiment scores per dirctionary. Then, the scores can be used as independent variables to predict price movement of stocks. `10-Q` form and `10-K` form will be analysed *separately*, in order to see whethter there could be some difference in the regression results in the two formats. 
 
-plotSentiment (good at plotting time series sentiment)
 
-### 10-Q
+### 10-Q sentiment analysis
+
 
 ```{r}
+
+#### Data preparation (10-Q)
+
 # this will be used to extract stock price
 # per symbol one by one from database
 symbols <- companies_q %>% select(Symbol) %>% pull()
@@ -1366,11 +1446,13 @@ clusterEvalQ(cl, {
 }
 )
 
-to_regress_q <- foreach(i = 1:length(cik_list_q), .options.snow = opts, .combine = rbind) %dopar% {
+to_regress_q <- foreach(i = 1:length(cik_list_q), 
+                        .options.snow = opts, 
+                        .combine = rbind) %dopar% {
   
   con <- dbConnect(SQLite(), "edgar.sqlite")
   
-  query_price <- paste0("SELECT symbol, date, volume, adjusted FROM prices WHERE symbol == '", 
+  query_price <- paste0("SELECT symbol, date, volume, adjusted FROM prices WHERE symbol == '",
                         symbols[i], "'")
   query_token <- paste0("SELECT * FROM `tokens_tf_idf_Q` WHERE CIK == ", 
                         cik_list_q[i])
@@ -1443,7 +1525,7 @@ to_regress_q <- foreach(i = 1:length(cik_list_q), .options.snow = opts, .combine
   
   # if there are missing sentiment columns
   # this code will adjust the number of columns
-  # as a fixed format of 9 nrc emtions always
+  # as a fixed format of 9 nrc emotions always
   
   if (length(colnames(emotions_nrc_10_K)) != 10) {
     colname <- c("anticipation", "fear", "anger", "joy", 
@@ -1516,8 +1598,6 @@ backup("edgar", "to_regress_Q", to_regress_q)
 
 - Logistic Regression: Direction of the price movement before and after the filing
 
-#### Pre-processing
-
 ```{r}
 # brief data check before regression models
 
@@ -1572,9 +1652,10 @@ rcompanion::plotNormalHistogram(to_regress_q_filtered$SentimentLM, breaks = 200)
 rcompanion::plotNormalHistogram(to_regress_q_filtered$sentiment_afinn, breaks = 200)
 ```
 
-#### Entire Corpus
+```{r}
 
-```{r company level}
+#### Company level (10-Q)
+
 # it is expected that 
 # more positive sentiment 
 # -> price goes up more (i.e. higher value of price_diff)
@@ -1629,10 +1710,10 @@ None of the sentiments have significant predictability on price difference befor
 
 None of the sentiments have significant predictability on the direction of price change after the filing, as all p values are far larger than 0.05. In other words, _according to the logistic regression result, 10-Q edgar filings' sentiments and stock price seem to have no significant relationship_.
 
-#### Industry level
 
+```{r}
 
-```{r industry level}
+#### Industry level (10-Q)
 
 # There are total 11 industries
 # specify an target industry to investigate
@@ -1698,9 +1779,9 @@ stargazer::stargazer(model_sentiment_1,
 - Consumer Discretionary - `SentimentLM` shows a possible predictive power on price change with p-value of 0.0378.
 
 
-#### Market level
+```{r}
 
-```{r market level}
+#### Market level (10-Q)
 
 # try iteratively 
 # by changing the target number i in GICS[i]
@@ -1748,9 +1829,13 @@ stargazer::stargazer(model_sentiment_1,
 
 There are only few markets in which sentiments seem to have significant relationships with stock price movement. For example, `Health Care Supplies` sentimentLM shows significant predictabilty on the direction of price change (p-value = 0.0382). However, in 10-Q forms, there is difficult to find stong relationship between sentiment scores and stock price movement in each market. There are 128 markets so I will not show the entire result here, but this approach can be applicable for further analysis.
 
-### 10-K
+### 10-K sentiment analysis
+
 
 ```{r}
+
+#### Data preparation (10-K)
+
 # entire process is same with the 10-Q form pre-processing above
 
 symbols <- companies_k %>% select(Symbol) %>% pull()
@@ -1783,7 +1868,9 @@ clusterEvalQ(cl, {
 }
 )
 
-to_regress_k <- foreach(i = 1:length(cik_list_k), .options.snow = opts, .combine = rbind) %dopar% {
+to_regress_k <- foreach(i = 1:length(cik_list_k), 
+                        .options.snow = opts, 
+                        .combine = rbind) %dopar% {
   
   con <- dbConnect(SQLite(), "edgar.sqlite")
   
@@ -1924,7 +2011,6 @@ backup("edgar", "to_regress_K", to_regress_k)
 
 - Logistic Regression: Direction of the price movement before and after the filing
 
-#### Pre-processing
 
 ```{r}
 # brief data check before regression models
@@ -1981,9 +2067,10 @@ rcompanion::plotNormalHistogram(to_regress_k_filtered$SentimentLM, breaks = 200)
 rcompanion::plotNormalHistogram(to_regress_k_filtered$sentiment_afinn, breaks = 200)
 ```
 
-#### Entire Corpus
+```{r}
 
-```{r company level}
+#### Company level (10-K)
+
 # it is expected that 
 # more positive sentiment 
 # -> price goes up more (i.e. higher value of price_diff)
@@ -2040,9 +2127,10 @@ stargazer::stargazer(model_sentiment_1,
 
 None of the sentiments have significant predictability on the direction of price change after the filing, as all p values are far larger than 0.05. In other words, _according to the logistic regression result, 10-K edgar filings' sentiments and stock price seem to have no significant relationship_.
 
-#### Industry level
 
-```{r industry level}
+```{r}
+
+#### Industry level (10-K)
 
 # There are total 11 industries
 # specify an target industry to investigate
@@ -2115,9 +2203,9 @@ stargazer::stargazer(model_sentiment_1,
 - Energy - `sentiment_afinn` shows a possible predictive power on price change with p-value of 0.021.
 
 
-#### Market level
+```{r}
 
-```{r market level}
+#### Market level (10-K)
 
 # try iteratively 
 # by changing the target number i in GICS[i]
@@ -2210,14 +2298,21 @@ getMgmtdisc_text <- function (this_html_filing) {
       filing.text <- filing.text[doc.start.line : doc.end.line]
     }
     
-    # customised (1)
+    # customised (1) - addded <XBRL>
+    # in case code below does not detect pattern properly
     # See if 10-K is in XBRL or old text format
     if (any(grepl(pattern = "<xml>|<type>xml|<html>|10k.htm|<XBRL>", filing.text, ignore.case = T))) {
       
       doc <- XML::htmlParse(filing.text, asText = TRUE)
       
-      f.text <- XML::xpathSApply(doc, "//text()[not(ancestor::script)][not(ancestor::style)][not(ancestor::noscript)][not(ancestor::form)]", 
-                                 XML::xmlValue)
+      # to show entire pattern below
+      # "//text()[not(ancestor::script)]
+      #[not(ancestor::style)][not(ancestor::noscript)][not(ancestor::form)]"
+      
+      f.text <- 
+        XML::xpathSApply(doc,
+                         "//text()[not(ancestor::script)][not(ancestor::style)][not(ancestor::noscript)][not(ancestor::form)]",
+                         XML::xmlValue)
       
       f.text <- iconv(f.text, "latin1", "ASCII", sub = " ")
       
@@ -2270,20 +2365,44 @@ getMgmtdisc_text <- function (this_html_filing) {
     f.text <- gsub('[[:digit:]]+',' ', f.text)
     f.text <- gsub('[[:punct:]]+',' ', f.text)
 
+    
     tryCatch({
       if (is.na(md.dicusssion) == TRUE) {
-        startline <- grep("^\\s*[item]*\\s*Management.*Discussion\\s*and\\s*Analysis\\s*of\\s*Financial\\s*Condition.*Operations\\s*$", f.text, ignore.case = TRUE) 
-        endline <- grep("^\\s*[item]*\\s*A{1}*\\s*Quantitative\\s*and\\s*Qualitative\\s*Disclosures\\s*$", f.text, ignore.case = TRUE)
+        # to show entire pattern below
+        # "^\\s*[item]*\\s*Management.*Discussion
+        # \\s*and\\s*Analysis\\s*of\\s*Financial\\s*Condition.*Operations\\s*$"
+        startline <- grep("^\\s*[item]*\\s*Management.*Discussion\\s*and\\s*Analysis\\s*of\\s*Financial\\s*Condition.*Operations\\s*$",
+                          f.text,
+                          ignore.case = TRUE) 
+        # to show entire pattern below
+        # "^\\s*[item]*\\s*A{1}*\\s*Quantitative
+        #\\s*and\\s*Qualitative\\s*Disclosures\\s*$"
+        
+        endline <- grep("^\\s*[item]*\\s*A{1}*\\s*Quantitative\\s*and\\s*Qualitative\\s*Disclosures\\s*$",
+                        f.text,
+                        ignore.case = TRUE)
         
         # try different pattern
         if (length(startline) == 0) {
-          startline <- grep("^\\s*[item]*\\s*Management.*Discussion\\s*and\\s*Analysis\\s*of\\s*Financial\\s*Condition\\s*$", f.text, ignore.case = TRUE) 
+          
+          # to show entire pattern below
+          # "^\\s*[item]*\\s*Management.*Discussion
+          # \\s*and\\s*Analysis\\s*of\\s*Financial\\s*Condition\\s*$"
+          startline <- grep("^\\s*[item]*\\s*Management.*Discussion\\s*and\\s*Analysis\\s*of\\s*Financial\\s*Condition\\s*$",
+                            f.text,
+                            ignore.case = TRUE) 
         }
         
         # try to find item 8 with title
         # if there is no item 7A
         if (length(endline) == 0) {
-          endline <- grep("^\\s*[item]*\\s*Financial\\s*Statements\\s*and\\s*Supplementary\\s*Data\\s*$", f.text, ignore.case = TRUE)
+          
+          # to show entire pattern below
+          # "^\\s*[item]*\\s*Financial\\s*Statements
+          # \\s*and\\s*Supplementary\\s*Data\\s*$"
+          endline <- grep("^\\s*[item]*\\s*Financial\\s*Statements\\s*and\\s*Supplementary\\s*Data\\s*$", 
+                          f.text, 
+                          ignore.case = TRUE)
         }
         
         if (length(startline) != 0 && length(endline) != 0) {
@@ -2353,7 +2472,9 @@ for (k in 1:length(cik_list_k)) {
   print(paste0("Start parallel processing for ", k, "th CIK: ", this_cik))
   start_time <- Sys.time()
   
-  mgmt_disc <- foreach(i = 1:length(filings), .options.snow = opts, .combine = rbind) %dopar% {
+  mgmt_disc <- foreach(i = 1:length(filings),
+                       .options.snow = opts, 
+                       .combine = rbind) %dopar% {
     
     setwd("D:/edgar")
     
@@ -2444,7 +2565,8 @@ for (k in 1:length(cik_list_k)) {
       # remove repititive words 
       # at least for three times
       # e.g. "aaa"
-      customstopwords <- tokens_h$word[grepl("\\b(\\S+?)\\1\\1\\S*\\b", tokens_h$word)]
+      customstopwords <- tokens_h$word[grepl("\\b(\\S+?)\\1\\1\\S*\\b", 
+                                             tokens_h$word)]
       
       if (length(customstopwords > 0)) {
         tokens_h <- tokens_h %>%
@@ -2465,7 +2587,8 @@ for (k in 1:length(cik_list_k)) {
   rm(cl)
   gc()
   
-  print(paste0("Finished parallel processing! It took ", Sys.time()-start_time, " to process"))
+  print(paste0("Finished parallel processing! It took ",
+               Sys.time()-start_time, " to process"))
   
   # if none of the texts are extrcated from all filings of one CIK
   # then just move to the next for loop
@@ -2502,8 +2625,10 @@ for (k in 1:length(cik_list_k)) {
 ```{r}
 con <- dbConnect(SQLite(), "edgar.sqlite")
 
-dbSendQuery(con, "CREATE INDEX cik_idx_mgmt_dics ON 'management_discussion_token' (cik)")
-dbSendQuery(con, "CREATE INDEX doc_id_idx_mgmt_dics ON 'management_discussion_token' (doc_id)")
+dbSendQuery(con, 
+            "CREATE INDEX cik_idx_mgmt_dics ON 'management_discussion_token' (cik)")
+dbSendQuery(con,
+            "CREATE INDEX doc_id_idx_mgmt_dics ON 'management_discussion_token' (doc_id)")
 
 dbListTables(con)
 
@@ -2538,7 +2663,9 @@ clusterEvalQ(cl, {
 # and then be removed
 dir.create("C:/r_working_directory/gitgit/edgar/text")
 
-postagged_mgmt <- foreach(i = 1:length(all_doc_id), .options.snow = opts, .combine = rbind) %dopar% {
+postagged_mgmt <- foreach(i = 1:length(all_doc_id),
+                          .options.snow = opts, 
+                          .combine = rbind) %dopar% {
   
   con <- dbConnect(SQLite(), "edgar.sqlite")
   
@@ -2553,10 +2680,15 @@ postagged_mgmt <- foreach(i = 1:length(all_doc_id), .options.snow = opts, .combi
   
   # save only words as txt file
   # to be tagged by treetagger engine
-  fwrite(list(word), file = paste0("C:/r_working_directory/gitgit/edgar/text/word", i,".txt"))
+  fwrite(list(word),
+         file = paste0("C:/r_working_directory/gitgit/edgar/text/word", 
+                       i,
+                       ".txt"))
   
   # perform POS tagging
-  text.tagged <- treetag(paste0("C:/r_working_directory/gitgit/edgar/text/word", i,".txt"),
+  text.tagged <- treetag(paste0("C:/r_working_directory/gitgit/edgar/text/word", 
+                                i,
+                                ".txt"),
                          treetagger = "manual", 
                          lang = "en", 
                          TT.options = list(path = "C:/TreeTagger", preset = "en"))
@@ -2694,7 +2826,6 @@ save(numtopics, file = "numtopics_mgmt.rda")
 
 ```{r todisplay}
 plot(numtopics)
-
 ```
 
 ```{r eval = TRUE, echo = FALSE}
@@ -2742,7 +2873,6 @@ save(edgarfit_mgmt, file = "edgarfit_mgmt.rda")
 # visualise the topics
 topicQuality(edgarfit_mgmt, documents = out$documents)
 plot(edgarfit_mgmt,labeltype = "prob")
-
 ```
 
 ```{r}
@@ -2824,7 +2954,7 @@ plot(corr)
 # topic 26: "tip_survey_depth_truck_road_engineer_voice"
 ```
 
-With `stm` result and `labels` I obtained, I will figure out whether there is any significant (marginal) changes in topics across the industries, markets and time. Before using `estimateEffect` function to figure out the effect of `GICS`, `GICS_sub` and `date_filed`, they need to be transformed into numeric data. They have too large number of levels to be put as factors into prevalence formula, which may cause difficulties in interpreting the results. Even though the industries or markets have no levels between them (i.e. they are nominal categories, not ordinal), I set the levels to allocate them to specific number. In this way, they can be converted to numeric vector, so that I can recognise how the topics vary between industries and markets. However, it is difficult to exactly figure out which topic is dominant in which industry or market with this approach as the categories are converted into numeric (continuous) data type.
+With `stm` result and `labels` I obtained, I will figure out whether there is any significant (marginal) changes in topics across the industries, markets and time. Before using `estimateEffect` function to figure out the effect of `GICS`, `GICS_sub` and `date_filed`, they need to be transformed into numeric data. They have too large number of levels to be put as factors into prevalence formula, which may cause difficulties in interpreting the results. Even though the industries or markets have no levels between them (i.e. they are nominal categories, not ordinal), I set the levels to allocate them to specific number. In this way, they can be converted to numeric vector, so that I can recognise how the topics vary between industries and markets.
 
 ```{r}
 # prepare metadata for estimateEffect function
@@ -2838,6 +2968,8 @@ metadata <- out$meta %>%
 # estimate effect of Date filed, Industry sector and Market sector on the topics probability
 # i.e. How topics probability(proportions) differ between time, GICS and GICS_sub
 # covariate -> Industry, Market and Time
+# s(date_filed) for spline function
+# enables more smoothe curve of the time series
 effects <- estimateEffect(~ s(date_filed) + GICS + GICS_sub,
                           stmobj = edgarfit_mgmt,
                           metadata = metadata)
@@ -2850,8 +2982,11 @@ save(effects, topic_labels, file =  "effects.rda")
 - from 1 to 11
 
 [1] "Health Care"            "Communication Services" "Consumer Staples"      
+
 [4] "Information Technology" "Utilities"              "Industrials"           
+
 [7] "Materials"              "Financials"             "Energy"                
+
 [10] "Consumer Discretionary" "Real Estate"
 
 
@@ -2860,66 +2995,127 @@ save(effects, topic_labels, file =  "effects.rda")
 - from 1 to 124
 
 [1] "Health Care Distributors"                     "Movies & Entertainment"
+
 [3] "Cable & Satellite"                            "Personal Products"                 
+
 [5] "Technology Hardware, Storage & Peripherals"   "Multi-Utilities"                   
+
 [7] "Packaged Foods & Meats"                       "Airlines"
+
 [9] "Railroads"                                    "Paper Packaging"
+
 [11] "Application Software"                         "Independent Power Producers & Energy Traders"
+
 [13] "Internet Services & Infrastructure"           "Investment Banking & Brokerage"   
+
 [15] "Oil & Gas Exploration & Production"           "Internet & Direct Marketing Retail"
+
 [17] "Specialized REITs"                            "Oil & Gas Equipment & Services"   
+
 [19] "Electrical Components & Equipment"            "Electric Utilities"               
+
 [21] "Apparel, Accessories & Luxury Goods"          "Oil & Gas Refining & Marketing"   
+
 [23] "Health Care Equipment"                        "Office REITs"                     
+
 [25] "Life Sciences Tools & Services"               "Oil & Gas Storage & Transportation"
+
 [27] "Restaurants"                                  "Hypermarkets & Super Centers"     
+
 [29] "Air Freight & Logistics"                      "Communications Equipment"         
-[31] "Industrial REITs"                             "Semiconductors"                   
+
+[31] "Industrial REITs"                             "Semiconductors"
+
 [33] "Aerospace & Defense"                          "Hotels, Resorts & Cruise Lines"   
+
 [35] "Construction & Engineering"                   "IT Consulting & Other Services"  
+
 [37] "Financial Exchanges & Data"                   "Environmental & Facilities Services"
+
 [39] "Retail REITs"                                 "Distributors"                     
+
 [41] "Household Appliances"                         "Trading Companies & Distributors" 
+
 [43] "Multi-Sector Holdings"                        "Hotel & Resort REITs"             
+
 [45] "Managed Health Care"                          "Apparel Retail"                   
+
 [47] "Regional Banks"                               "Reinsurance"                      
+
 [49] "Health Care Supplies"                         "Life & Health Insurance"          
+
 [51] "Data Processing & Outsourced Services"        "Electronic Manufacturing Services"
+
 [53] "Asset Management & Custody Banks"             "Consumer Electronics"             
+
 [55] "Real Estate Services"                         "Insurance Brokers"                
+
 [57] "Property & Casualty Insurance"                "Automotive Retail"                
+
 [59] "Gold"                                         "Specialty Stores"                 
+
 [61] "Casinos & Gaming"                             "Systems Software"                 
+
 [63] "Specialized Consumer Services"                "Multi-line Insurance"             
+
 [65] "Wireless Telecommunication Services"          "Specialty Chemicals"              
-[67] "Fertilizers & Agricultural Chemicals"         "Interactive Media & Services"     
+
+[67] "Fertilizers & Agricultural Chemicals"         "Interactive Media & Services"
+
 [69] "Thrifts & Mortgage Finance"                   "Consumer Finance"                 
+
 [71] "Construction Materials"                       "Technology Distributors"          
+
 [73] "Water Utilities"                              "Tobacco"
+
 [75] "Broadcasting"                                 "Research & Consulting Services"
+
 [77] "Industrial Machinery"                         "Automobile Manufacturers"
+
 [79] "Distillers & Vintners"                        "Building Products"
+
 [81] "Auto Parts & Equipment"                       "Pharmaceuticals"
+
 [83] "Publishing"                                   "Electronic Equipment & Instruments"
+
 [85] "Drug Retail"                                  "Industrial Gases"
+
 [87] "Construction Machinery & Heavy Trucks"        "Alternative Carriers"
+
 [89] "Soft Drinks"                                  "Household Products"
+
 [91] "Brewers"                                      "Electronic Components"
+
 [93] "General Merchandise Stores"                   "Advertising"
+
 [95] "Human Resource & Employment Services"         "Biotechnology"
+
 [97] "Semiconductor Equipment"                      "Health Care Facilities"
+
 [99] "Home Improvement Retail"                      "Industrial Conglomerates"
+
 [101] "Integrated Oil & Gas"                         "Leisure Products"
+
 [103] "Oil & Gas Drilling"                           "Food Retail"
+
 [105] "Home Furnishings"                             "Agricultural Products"
+
 [107] "Diversified Banks"                            "Interactive Home Entertainment"
+
 [109] "Diversified Support Services"                 "Department Stores"
+
 [111] "Trucking"                                     "Gas Utilities"
+
 [113] "Steel"                                        "Health Care REITs"
+
 [115] "Residential REITs"                            "Computer & Electronics Retail"
+
 [117] "Motorcycle Manufacturers"                     "Health Care Technology"
+
 [119] "Housewares & Specialties"                     "Homebuilding"
+
 [121] "Diversified Chemicals"                        "Health Care Services"
+
 [123] "Metal & Glass Containers"                     "Food Distributors"         
 
 ### Industry influence on topics
@@ -2955,12 +3151,33 @@ for(i in 1:length(topic_labels)){
        labeltype = "custom")
 }
 
+# top 3 topics
+for(i in c(5, 6, 14)){
+  plot(effects, covariate = "GICS",
+       topics = i,
+       model = edgarfit_mgmt, method = "continuous",
+       # For this plotting we get the uper quantile
+       # and low quantile of the price 
+       xlab = "GICS",
+       # xlim = c(0,1000),
+       main = topic_labels[i],
+       printlegend = FALSE,
+       custom.labels =topic_labels[i],
+       labeltype = "custom")
+}
+
+summary(effects, topics = 5)
+summary(effects, topics = 6)
+summary(effects, topics = 14)
+
 ```
 
 ```{r eval = TRUE, echo = FALSE}
 # to display
 load("effects.rda")
 load("edgarfit_mgmt.rda")
+
+topic_num <- sapply(c(1:35), function (x) paste0("topic_", as.character(x)))
 
 plot(effects, 
      covariate = "GICS",
@@ -2970,10 +3187,11 @@ plot(effects,
      xlab = "GICS",
      # xlim = c(-0.01,0.01),
      main = "Marginal change on topic probabilities for Industry sector",
-     custom.labels = topic_labels,
-     labeltype = "custom")
+     custom.labels = topic_num,
+     labeltype = "custom"
+)
 
-for(i in 1:length(topic_labels)){
+for(i in c(6, 5, 14)){
   plot(effects, covariate = "GICS",
        topics = i,
        model = edgarfit_mgmt, method = "continuous",
@@ -2991,18 +3209,73 @@ for(i in 1:length(topic_labels)){
 
 **top 3 topics seems to vary the most (industry level)**
 
-- topic 6:`ground_association_maryland_buyer_definition_formation_utility` (more related to _higher_ level industries in the dictionary)
+- topic 6:`ground_association_maryland_buyer_definition_formation_utility` (more related to _higher_ level industries in the dictionary) - p-value < 2e-16
 
-- topic 5: `pharmacy_medicine_hospital_efficacy_patent_biotechnology_oncology` (more related to _lower_ level industries in the dictionary)
+- topic 5: `pharmacy_medicine_hospital_efficacy_patent_biotechnology_oncology` (more related to _lower_ level industries in the dictionary) - p-value < 2e-16
 
-- topic 14: `merchandise_shipment_season_retailer_holiday_opening_specialty` (more related to _higher_ level industries in the dictionary)
+- topic 14: `merchandise_shipment_season_retailer_holiday_opening_specialty` (more related to _higher_ level industries in the dictionary) - p-value < 2e-16
 
-These three topics show highest marginal change in probabilities across the industries among all topics. This means that _they seem to appear dominantly in certain industries (exclusitivity of topics with respect to industry sectors)_.
+These three topics show highest marginal change in probabilities across the industries among all topics. This means that _they seem to appear dominantly in certain industries (exclusitivity of topics with respect to industry sectors)_. Now I will figure out which industry these 3 topics are more likely to appear.
+
+```{r}
+theta <- as.data.frame(edgarfit_mgmt$theta)
+
+# use topic number not label 
+# for convenience
+colnames(theta) <- paste0("topic_", table_towrite_labels$topicnum)
+
+GICS_theta_mean <- cbind(out$meta,theta) %>%
+  select(GICS,13:47) %>%
+  group_by(GICS) %>%
+  summarise_at(vars(all_of(paste0("topic_", table_towrite_labels$topicnum))), mean)
+
+# topic 6: ground_association_maryland_buyer_definition_formation_utility
+
+GICS_theta_mean %>%
+  select(GICS, topic_6) %>%
+  arrange(desc(topic_6))
+
+# topic 5: pharmacy_medicine_hospital_efficacy_patent_biotechnology_oncology
+
+GICS_theta_mean %>%
+  select(GICS, topic_5) %>%
+  arrange(desc(topic_5))
+
+# topic 14: merchandise_shipment_season_retailer_holiday_opening_specialty
+
+GICS_theta_mean %>%
+  select(GICS, topic_14) %>%
+  arrange(desc(topic_14))
+
+rm(GICS_theta_mean)
+gc()
+```
+
+**About top 3 topics - Which industries do they appear the most? (top 2)**
+
+(Higher theta indicates higher proportion of a topic appears)
+
+- topic 6:`ground_association_maryland_buyer_definition_formation_utility` 
+
+rank 1. Real estate - mean theta 0.4942419059
+
+rank 2. Consumer Discretionary - mean theta 0.0388435634
+
+- topic 5: `pharmacy_medicine_hospital_efficacy_patent_biotechnology_oncology`
+
+rank 1. Health Care - mean theta 0.2263613
+
+rank 2. Consumer Staples - mean theta 0.009111501
+
+- topic 14: `merchandise_shipment_season_retailer_holiday_opening_specialty` 
+
+rank 1. Consumer Discretionary - 0.1801082677
+
+rank 2. Consumer Staples - 0.0304000571
 
 ### Market influence on topics
 
 ```{r}
-
 ## the effects of markets on topic probability
 
 plot(effects, 
@@ -3015,6 +3288,8 @@ plot(effects,
      main = "Marginal change on topic probabilities for Industry sector",
      custom.labels = topic_labels,
      labeltype = "custom")
+
+# linear relationship between each topic and markets
 
 for(i in 1:length(topic_labels)){
   plot(effects, covariate = "GICS_sub",
@@ -3030,6 +3305,24 @@ for(i in 1:length(topic_labels)){
        labeltype = "custom")
 }
 
+# display top 3 topics
+for(i in c(6, 9, 13)){
+  plot(effects, covariate = "GICS_sub",
+       topics = i,
+       model = edgarfit_mgmt, method = "continuous",
+       # For this plotting we get the uper quantile
+       # and low quantile of the price 
+       xlab = "GICS_sub",
+       # xlim = c(0,1000),
+       main = topic_labels[i],
+       printlegend = FALSE,
+       custom.labels =topic_labels[i],
+       labeltype = "custom")
+}
+
+summary(effects, topics = 6)
+summary(effects, topics = 9)
+summary(effects, topics = 13)
 ```
 
 ```{r eval = TRUE, echo = FALSE}
@@ -3042,10 +3335,10 @@ plot(effects,
      xlab = "GICS",
      # xlim = c(-0.01,0.01),
      main = "Marginal change on topic probabilities for Industry sector",
-     custom.labels = topic_labels,
+     custom.labels = topic_num,
      labeltype = "custom")
 
-for(i in 1:length(topic_labels)){
+for(i in c(9, 13, 6)){
   plot(effects, covariate = "GICS_sub",
        topics = i,
        model = edgarfit_mgmt, method = "continuous",
@@ -3063,13 +3356,83 @@ for(i in 1:length(topic_labels)){
 
 **top 3 topics seems to vary the most (market level)**
 
-- topic 9: `regulator_recommendation_reliability_pollution_carbon_ratemaking_territory` (more related to _lower_ level markets in the dictionary)
+- topic 9: `regulator_recommendation_reliability_pollution_carbon_ratemaking_territory` (more related to _lower_ level markets in the dictionary) - p-value < 2e-16
 
-- topic 13: `engineer_viability_accretion_hub_quantity_reservoir_revision` (more related to _lower_ level markets in the dictionary)
+- topic 13: `engineer_viability_accretion_hub_quantity_reservoir_revision` (more related to _lower_ level markets in the dictionary) - p-value <2e-16
 
-- topic 6: `ground_association_maryland_buyer_definition_formation_utility` (more related to _higher_ level markets in the dictionary)
+- topic 6: `ground_association_maryland_buyer_definition_formation_utility` (more related to _higher_ level markets in the dictionary) - p-value = 5.35e-12
 
-These three topics show highest marginal change in probabilities across the markets among all topics. This means that _they seem to appear dominantly in certain markets (exclusitivity of topics with respect to market sectors)_.
+These three topics show highest marginal change in probabilities across the markets among all topics. This means that _they seem to appear dominantly in certain markets (exclusitivity of topics with respect to market sectors)_. Now I will figure out which market these 3 topics are more likely to appear.
+
+```{r}
+
+GICS_sub_theta_mean <- cbind(out$meta,theta) %>%
+  select(GICS_sub,13:47) %>%
+  group_by(GICS_sub) %>%
+  summarise_at(vars(all_of(paste0("topic_", table_towrite_labels$topicnum))), mean)
+
+# topic 9: `regulator_recommendation_reliability_pollution_carbon_ratemaking_territory`
+
+GICS_sub_theta_mean %>%
+  select(GICS_sub, topic_9) %>%
+  arrange(desc(topic_9))
+
+# topic 13: `engineer_viability_accretion_hub_quantity_reservoir_revision`
+
+GICS_sub_theta_mean %>%
+  select(GICS_sub, topic_13) %>%
+  arrange(desc(topic_13))
+
+# topic 6: `ground_association_maryland_buyer_definition_formation_utility`
+
+GICS_sub_theta_mean %>%
+  select(GICS_sub, topic_6) %>%
+  arrange(desc(topic_6))
+
+rm(GICS_sub_theta_mean)
+gc()
+```
+
+**About top 3 topics - Which markets do they appear the most? (top 5)**
+
+(Higher theta indicates higher proportion of a topic appears)
+
+- topic 9: `regulator_recommendation_reliability_pollution_carbon_ratemaking_territory`
+
+rank 1. Electric Utilities	- mean theta 0.7510207		
+
+rank 2. Multi-Utilities	- mean theta 0.7037211	
+
+rank 3. Water Utilities - mean theta	0.4508054		
+
+rank 4. Independent Power Producers & Energy Traders - mean theta	0.4406535		
+
+rank 5. Gas Utilities - mean theta 0.4268549
+
+- topic 13: `engineer_viability_accretion_hub_quantity_reservoir_revision`
+
+rank 1. Oil & Gas Exploration & Production - mean theta	0.6866182		
+
+rank 2. Integrated Oil & Gas - mean theta	0.5482505		
+
+rank 3. Gold - mean theta	0.2782034		
+
+rank 4. Oil & Gas Equipment & Services - mean theta	0.2260516		
+
+rank 5. Oil & Gas Drilling - mean theta 0.1890175
+
+- topic 6: `ground_association_maryland_buyer_definition_formation_utility` 
+
+rank 1. Retail REITs - mean theta	0.7610708		
+
+rank 2. Office REITs - mean theta	0.7200422
+
+rank 3. Residential REITs - mean theta 0.6461352		
+
+rank 4. Industrial REITs - mean theta	0.4911548		
+
+rank 5. Homebuilding - mean theta	0.4501610	
+
 
 ### Time influence on topics
 
@@ -3098,9 +3461,26 @@ for (i in 1:length(topic_labels)) {
      labels = as.character(monthseq))
 }
 
-(summary(effects, topics = 12))
-(summary(effects, topics = 27))
-(summary(effects, topics = 28))
+for (i in c(12, 27, 28)) {
+  x <- plot(effects, 
+     "date_filed", 
+     method = "continuous", topics = i,
+     main = topic_labels[i], 
+     model = edgarfit_mgmt,
+     printlegend = FALSE, 
+     xaxt = "n", 
+     xlab = "Time", 
+     custom.labels =topic_labels[i], 
+     labeltype = "custom")
+  
+  axis(1,
+     at =  as.numeric(monthseq), 
+     labels = as.character(monthseq))
+}
+
+summary(effects, topics = 12)
+summary(effects, topics = 27)
+summary(effects, topics = 28)
 
 ```
 
@@ -3109,7 +3489,7 @@ for (i in 1:length(topic_labels)) {
 monthseq <- seq(from = as.Date("2009-01-01"),
                 to = as.Date("2020-01-01"), by = "month")
 
-for (i in 1:length(topic_labels)) {
+for (i in c(12, 27, 28)) {
   x <- plot(effects, 
      "date_filed", 
      method = "continuous", topics = i,
@@ -3130,32 +3510,29 @@ for (i in 1:length(topic_labels)) {
 
 **Topic 12, 27, 28 show a certain changes in their proportions depending on the time.**
 
-- Topic 12 (`obsolescence_intellectual_patent_user_cancellation_manufacturer_evidence`) starts to appear very frequently since the start of 2019 as shown in the graph and statistical evidence (`confidence interval and p-value`) also shows that this increase is significant. 
+- Topic 12 - (`obsolescence_intellectual_patent_user_cancellation_manufacturer_evidence`) 
 
-- Topic 27 (`extent_issuance_commitment_job_repayment_enactment_cut`) topic proportion starts to increase since the start of 2017 and statistical evidence (`confidence interval and p-value`) supports this trend. 
+topic proportion starts to grow up since the start of 2019 as shown in the graph and statistical evidence (`confidence interval and p-value`) also shows that this increase is significant. 
 
-- topic 28 (`counsel_view_divestiture_recoverability_circumstance_lawsuit_repatriation`) topic proportion starts to rapidly increase since the start of 2019 and statistical evidence (`confidence interval and p-value`) supports this trend.
+- Topic 27 - (`extent_issuance_commitment_job_repayment_enactment_cut`) topic proportion 
+
+topic proportion starts to increase since the start of 2017 and statistical evidence (`confidence interval and p-value`) supports this trend. 
+
+- topic 28 - (`counsel_view_divestiture_recoverability_circumstance_lawsuit_repatriation`)
+
+topic proportion starts to rapidly increase since the start of 2019 and statistical evidence (`confidence interval and p-value`) supports this trend.
 
 However, most of the topics except these three topics seem to have no clear trends across the date of the filing, as shown in the graphs. Their `confidence intervals` (wide dotted lines) and summary of the effects (high `p values`) indicates that most of these influences of time on the topics not significant. Therefore, I concluded that _'generally, some topics seem to be able to have tendency of up and down depending on the time difference, but it is difficult to say all those trends are significant'_.
 
 ## Additional predictibility of topics on stock price
 
-```{r}
-# attach theta data
-# to metadata file
-# prepare data for regression analysis
-
-theta <- as.data.frame(edgarfit_mgmt$theta)
-
-# use topic number not label 
-# for convenience
-colnames(theta) <- paste0("topic_", table_towrite_labels$topicnum)
-
-for_regression <- cbind(metadata,theta)
-```
 
 ```{r}
-# I chose `SentimentLM` as fixed independent variable based on the previous analysis results
+# prepare data set for regression analysis 
+for_regression <- cbind(out$meta,theta)
+
+# I chose `SentimentLM` as starting independent variable
+# based on the previous analysis results
 # I will add on some topics as independent variable
 # to check if it adds on additional predictibility on stock price change
 
@@ -3178,8 +3555,8 @@ for_regression_filtered <- for_regression %>%
          )
 
 
-# figure out which topics have possible predictibility on stock price movement
-# firstly try simple linear regression
+# figure out which topics seem to have possible predictibility on stock price movement
+# try simple linear regression
 # iteratively putting topic into independent variable one by one
 # and figure out significant topics
 
@@ -3253,15 +3630,12 @@ summary(model_final)
 
 - `SentimentLM`: Marginal increase in Loughran and McDonald sentiment score can significantly *increase* the amount of price change after the filing by 0.96799 (t = 2.037, p-value = 0.0417)
 
-- `disclosure_policy_judgment_interpretation_position_accordance_valuation`: Marginal increase in the proportion (probability) of topic_1 significantly *decrease* the amount of price change after the filing by 0.1997 (t = -2.052, p-value = 0.0403)
+- `disclosure_policy_judgment_interpretation_position_accordance_valuation`: Marginal increase in the proportion (theta) of `topic_1` significantly *decrease* the amount of price change after the filing by 0.1997 (t = -2.052, p-value = 0.0403)
 
-- `engineer_viability_accretion_hub_quantity_reservoir_revision`: Marginal increase in the proportion (probability) of topic_13 significantly *decrease* the amount of price change after the filing by 0.29088 (t = -2.557, p-value = 0.0106)
+- `engineer_viability_accretion_hub_quantity_reservoir_revision`: Marginal increase in the proportion (theta) of `topic_13` significantly *decrease* the amount of price change after the filing by 0.29088 (t = -2.557, p-value = 0.0106)
 
-- The overall model fit increased gradually according to `R2` and `Adjusted R2`. However, the model fit is pretty bad as R2 is only 0.004. Therefore, further investigation on more powerful predicting variables are required to increase the model predictibility.
+- The overall model fit increased gradually according to `R2` and `Adjusted R2`. However, the model fit is pretty bad as R2 is only 0.004 in the final model. Therefore, further investigation on more powerful predicting variables are required to increase the model predictibility.
 
 R2                          0.001                 0.002                 0.004         
 Adjusted R2                 0.001                 0.002                 0.003         
-
-
-
 
