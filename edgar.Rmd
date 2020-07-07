@@ -6,7 +6,6 @@ output:
     toc: TRUE
     toc_depth: 3
 ---
-
 <style>
 body {
 text-align: justify}
