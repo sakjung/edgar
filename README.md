@@ -14,4 +14,4 @@ This excel file contains the list of S&P500 companies and their metadata. This w
 
 ## index.html
 
-this is html version of edgar.Rmd. This is also available at [here](https://sakjung.github.io/edgar)
+This is html version of edgar.Rmd. This is also available at [here](https://sakjung.github.io/edgar)
