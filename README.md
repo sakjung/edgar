@@ -1,5 +1,7 @@
 # EDGAR
 
+Skill Set: Data Crawling/Scraping, Data Engineering, Text Pre-Processing Techniques, Basic Text Analysis, Sentiment Analysis, Topic Modelling
+
 ## Introduction
 
 This project tried various text analysis approaches on Edgar 10-K and 10-Q form filings of S&P 500 companies. Firstly, text data was explored and pre-processed for further analysis. Sentiment analysis and topic modelling techniques were tried in order to extract various features that could have predictive power on stock prices.
