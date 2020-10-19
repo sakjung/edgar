@@ -14,4 +14,4 @@
 
 ---------
 
-Skill Set: Data Crawling/Scraping, Data Engineering, Text Pre-Processing Techniques, Basic Text Analysis, Sentiment Analysis, Topic Modelling
+Skill Set: Data Crawling/Scraping, Data Engineering, Text Pre-Processing Techniques, Sentiment Analysis, Topic Modelling
